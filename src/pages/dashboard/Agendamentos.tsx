@@ -6,6 +6,7 @@ import { FiCalendar, FiPlus, FiX, FiVideo } from 'react-icons/fi';
 import { toast } from "react-toastify";
 import { isAfter, isBefore } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
+import { useLocation } from 'react-router-dom';
 
 type Playlist = {
     id: string;
@@ -33,6 +34,7 @@ type ModalData =
 
 export default function CalendarioAvancado() {
     const { getToken } = useAuth();
+    const location = useLocation();
     const [playlists, setPlaylists] = useState<Playlist[]>([]);
     const [agendamentos, setAgendamentos] = useState<Agendamento[]>([]);
     const [selectedDate, setSelectedDate] = useState(new Date());
@@ -44,6 +46,14 @@ export default function CalendarioAvancado() {
 
     useEffect(() => {
         fetchPlaylists();
+        
+        // Verificar se veio de uma playlist específica
+        const urlParams = new URLSearchParams(location.search);
+        const playlistId = urlParams.get('playlist');
+        if (playlistId) {
+            setFiltroPlaylist(playlistId);
+            setModalData({ type: 'create', date: new Date() });
+        }
     }, []);
 
     useEffect(() => {
@@ -398,6 +408,7 @@ function NovoAgendamentoForm({
     onClose,
 }: NovoAgendamentoFormProps) {
     const { getToken } = useAuth();
+    const location = useLocation();
     const [playlistId, setPlaylistId] = useState('');
     const [shuffle, setShuffle] = useState<'sim' | 'nao'>('nao');
     const [frequencia, setFrequencia] = useState<
@@ -410,6 +421,14 @@ function NovoAgendamentoForm({
     );
     const [inicioHora, setInicioHora] = useState('00:00');
 
+    useEffect(() => {
+        // Verificar se veio de uma playlist específica
+        const urlParams = new URLSearchParams(location.search);
+        const preSelectedPlaylist = urlParams.get('playlist');
+        if (preSelectedPlaylist) {
+            setPlaylistId(preSelectedPlaylist);
+        }
+    }, [location]);
     function toggleDiaSemana(dia: number) {
         setDiasSemana((old) =>
             old.includes(dia) ? old.filter((d) => d !== dia) : [...old, dia]

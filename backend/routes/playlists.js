@@ -57,6 +57,7 @@ router.get('/:id/videos', authMiddleware, async (req, res) => {
   try {
     const playlistId = req.params.id;
     const userId = req.user.id;
+    const userBitrateLimit = req.user.bitrate || 2500;
 
     // Verificar se playlist pertence ao usuário
     const [playlistRows] = await db.execute(
@@ -74,11 +75,16 @@ router.get('/:id/videos', authMiddleware, async (req, res) => {
         0 as ordem,
         v.nome,
         v.url,
-        v.duracao
+        v.duracao,
+        v.bitrate_video,
+        v.formato_original,
+        v.is_mp4,
+        v.compativel,
+        v.codec_video
        FROM videos v
-       WHERE v.playlist_id = ?
+       WHERE v.playlist_id = ? AND v.is_mp4 = 1 AND v.bitrate_video <= ?
        ORDER BY v.id`,
-      [playlistId]
+      [playlistId, userBitrateLimit]
     );
 
     // Ajustar URLs para serem acessíveis
@@ -89,7 +95,12 @@ router.get('/:id/videos', authMiddleware, async (req, res) => {
         id: video.id,
         nome: video.nome,
         url: video.url,
-        duracao: video.duracao
+        duracao: video.duracao,
+        bitrate_video: video.bitrate_video,
+        formato_original: video.formato_original,
+        is_mp4: video.is_mp4,
+        compativel: video.compativel,
+        codec_video: video.codec_video
       }
     }));
 

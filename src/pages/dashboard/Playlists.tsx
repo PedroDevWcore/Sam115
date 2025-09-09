@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, PlusCircle, X, Edit2, Trash2, Play, Minimize, Maximize } from 'lucide-react';
+import { ChevronDown, ChevronRight, PlusCircle, X, Edit2, Trash2, Play, Minimize, Maximize, Pause, SkipForward, SkipBack, Calendar, Zap, AlertTriangle, CheckCircle } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useAuth } from '../../context/AuthContext';
-import VideoJSPlayer from '../../components/VideoJSPlayer';
+import { Link } from 'react-router-dom';
+import IFrameVideoPlayer from '../../components/IFrameVideoPlayer';
 
 import {
   DndContext,
@@ -40,10 +41,25 @@ interface Video {
   url?: string;
   duracao?: number;
   tamanho?: number;
+  bitrate_video?: number;
+  formato_original?: string;
+  codec_video?: string;
+  is_mp4?: boolean;
+  compativel?: string;
+  compatibility_status?: string;
+  compatibility_message?: string;
+  needs_conversion?: boolean;
+  user_bitrate_limit?: number;
+}
+
+interface PlaylistAction {
+  type: 'start' | 'pause' | 'stop' | 'schedule';
+  playlistId: number;
+  playlistName: string;
 }
 
 const Playlists: React.FC = () => {
-  const { getToken } = useAuth();
+  const { getToken, user } = useAuth();
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -61,6 +77,8 @@ const Playlists: React.FC = () => {
   const [playlistPlayerIndex, setPlaylistPlayerIndex] = useState(0);
   const [currentVideoUrl, setCurrentVideoUrl] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentPlaylistId, setCurrentPlaylistId] = useState<number | null>(null);
 
   // Modal de confirmação
   const [modalConfirmacao, setModalConfirmacao] = useState({
@@ -71,41 +89,68 @@ const Playlists: React.FC = () => {
     detalhes: ''
   });
 
+  // Modal de ações da playlist
+  const [showActionModal, setShowActionModal] = useState(false);
+  const [selectedAction, setSelectedAction] = useState<PlaylistAction | null>(null);
+
+  const userBitrateLimit = user?.bitrate || 2500;
+
   const closePlayerModal = () => {
     setVideoPlayerModalOpen(false);
     setPlaylistVideosToPlay([]);
     setPlaylistPlayerIndex(0);
     setCurrentVideoUrl('');
     setIsFullscreen(false);
+    setIsPlaying(false);
+    setCurrentPlaylistId(null);
+  };
+
+  // Função para filtrar vídeos compatíveis
+  const filterCompatibleVideos = (videos: Video[]): Video[] => {
+    return videos.filter(video => {
+      // Verificar se é MP4
+      const isMP4 = video.is_mp4 || video.formato_original?.toLowerCase() === 'mp4';
+      
+      // Verificar bitrate
+      const videoBitrate = video.bitrate_video || 0;
+      const bitrateOk = videoBitrate <= userBitrateLimit;
+      
+      // Verificar status de compatibilidade
+      const isCompatible = video.compatibility_status === 'compatible' || 
+                          video.compatibility_message === 'Otimizado' ||
+                          video.compativel === 'otimizado' ||
+                          video.compativel === 'sim';
+      
+      // Não precisa conversão
+      const doesNotNeedConversion = !video.needs_conversion;
+      
+      // Retornar apenas vídeos que atendem todos os critérios
+      return isMP4 && bitrateOk && (isCompatible || doesNotNeedConversion);
+    });
   };
 
   // Função para construir URL correta do vídeo
-  const buildVideoUrl = (url: string) => {
-    if (!url) return '';
+  const buildVideoUrl = (video: Video) => {
+    if (!video.url) return '';
     
-    // Se já é uma URL completa, usar como está
-    if (url.startsWith('http')) {
-      return url;
+    // Extrair informações do caminho
+    const cleanPath = video.url.replace(/^\/+/, '').replace(/^(content\/|streaming\/)?/, '');
+    const pathParts = cleanPath.split('/');
+    
+    if (pathParts.length >= 3) {
+      const userLogin = pathParts[0];
+      const folderName = pathParts[1];
+      const fileName = pathParts[2];
+      
+      const finalFileName = fileName.endsWith('.mp4') ? fileName : fileName.replace(/\.[^/.]+$/, '.mp4');
+      const domain = 'stmv1.udicast.com';
+      
+      return `https://${domain}:1443/play.php?login=${userLogin}&video=${folderName}/${finalFileName}`;
     }
     
-
-    // Para o novo sistema, usar API para obter URL correta
-    return `/api/videos/view-url?path=${encodeURIComponent(url)}`;
+    return '';
   };
 
-  // Função otimizada para vídeos SSH
-  const buildOptimizedSSHUrl = (url: string) => {
-    if (!url.includes('/api/videos-ssh/stream/')) return url;
-    
-    const videoId = url.split('/stream/')[1]?.split('?')[0];
-    if (videoId) {
-      const token = localStorage.getItem('auth_token');
-      return `/api/videos-ssh/proxy-stream/${videoId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
-    }
-    
-    return url;
-  };
-  
   const carregarPlaylists = async () => {
     try {
       setStatus(null);
@@ -200,7 +245,9 @@ const Playlists: React.FC = () => {
 
           if (videosResponse.ok) {
             const videosData = await videosResponse.json();
-            grouped[folder.id] = videosData;
+            // Filtrar apenas vídeos compatíveis
+            const compatibleVideos = filterCompatibleVideos(videosData);
+            grouped[folder.id] = compatibleVideos;
           }
         } catch (error) {
           console.error(`Erro ao carregar vídeos da pasta ${folder.id}:`, error);
@@ -424,28 +471,66 @@ const Playlists: React.FC = () => {
       transition,
       cursor: 'grab',
     };
+
+    const getCompatibilityIcon = () => {
+      if (video.compatibility_status === 'compatible' || video.compatibility_message === 'Otimizado') {
+        return <CheckCircle className="h-4 w-4 text-green-600" />;
+      } else if (video.needs_conversion) {
+        return <AlertTriangle className="h-4 w-4 text-red-600" />;
+      }
+      return <CheckCircle className="h-4 w-4 text-green-600" />;
+    };
+
+    const getBitrateColor = () => {
+      const bitrate = video.bitrate_video || 0;
+      if (bitrate > userBitrateLimit) return 'text-red-600';
+      if (bitrate > userBitrateLimit * 0.8) return 'text-yellow-600';
+      return 'text-green-600';
+    };
+
     return (
       <li
         ref={setNodeRef}
         style={style}
         {...attributes}
         {...listeners}
-        className="p-1 text-sm hover:bg-zinc-100 rounded flex justify-between items-center cursor-pointer"
+        className="p-2 text-sm hover:bg-zinc-100 rounded flex justify-between items-center cursor-pointer border border-gray-200 mb-1"
       >
-        <span onClick={() => setSelectedVideos((prev) => [...prev, video])}>
-          {video.nome}
-        </span>
+        <div className="flex-1 min-w-0" onClick={() => setSelectedVideos((prev) => [...prev, video])}>
+          <div className="flex items-center space-x-2">
+            {getCompatibilityIcon()}
+            <span className="truncate">{video.nome}</span>
+          </div>
+          <div className="flex items-center space-x-3 mt-1">
+            <span className={`text-xs font-medium ${getBitrateColor()}`}>
+              <Zap className="h-3 w-3 inline mr-1" />
+              {video.bitrate_video || 0} kbps
+            </span>
+            <span className="text-xs text-gray-500">
+              {video.formato_original?.toUpperCase() || 'MP4'}
+            </span>
+            {video.duracao && (
+              <span className="text-xs text-gray-500">
+                {formatarDuracao(video.duracao)}
+              </span>
+            )}
+          </div>
+        </div>
         <button
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            // Abrir modal do player
-            setCurrentVideoUrl(buildVideoUrl(video.url || ''));
-            setPlaylistVideosToPlay([video]);
-            setPlaylistPlayerIndex(0);
-            setVideoPlayerModalOpen(true);
+            const videoUrl = buildVideoUrl(video);
+            if (videoUrl) {
+              setCurrentVideoUrl(videoUrl);
+              setPlaylistVideosToPlay([video]);
+              setPlaylistPlayerIndex(0);
+              setVideoPlayerModalOpen(true);
+            } else {
+              toast.error('Não foi possível construir URL do vídeo');
+            }
           }}
-          className="text-blue-600 hover:text-blue-800 p-1"
+          className="text-blue-600 hover:text-blue-800 p-1 ml-2"
           title="Assistir vídeo"
         >
           <Play size={16} />
@@ -461,24 +546,56 @@ const Playlists: React.FC = () => {
       transition,
       cursor: 'grab',
     };
+
+    const getBitrateColor = () => {
+      const bitrate = video.bitrate_video || 0;
+      if (bitrate > userBitrateLimit) return 'text-red-600';
+      if (bitrate > userBitrateLimit * 0.8) return 'text-yellow-600';
+      return 'text-green-600';
+    };
+
     return (
       <li
         ref={setNodeRef}
         style={style}
         {...attributes}
         {...listeners}
-        className="flex justify-between items-center p-2 mb-1 bg-zinc-100 rounded cursor-move"
+        className="flex justify-between items-center p-3 mb-2 bg-zinc-100 rounded cursor-move border border-gray-300"
       >
-        <span>{video.nome}</span>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium truncate">{video.nome}</div>
+          <div className="flex items-center space-x-3 mt-1">
+            <span className={`text-xs font-medium ${getBitrateColor()}`}>
+              <Zap className="h-3 w-3 inline mr-1" />
+              {video.bitrate_video || 0} kbps
+            </span>
+            <span className="text-xs text-gray-500">
+              {video.formato_original?.toUpperCase() || 'MP4'}
+            </span>
+            {video.duracao && (
+              <span className="text-xs text-gray-500">
+                {formatarDuracao(video.duracao)}
+              </span>
+            )}
+          </div>
+        </div>
         <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">
+            #{index + 1}
+          </span>
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              setCurrentVideoUrl(buildOptimizedSSHUrl(buildVideoUrl(video.url || '')));
-              setPlaylistVideosToPlay([video]);
-              setPlaylistPlayerIndex(0);
-              setVideoPlayerModalOpen(true);
+              const videoUrl = buildVideoUrl(video);
+              if (videoUrl) {
+                setCurrentVideoUrl(videoUrl);
+                setPlaylistVideosToPlay([video]);
+                setPlaylistPlayerIndex(0);
+                setVideoPlayerModalOpen(true);
+              } else {
+                toast.error('Não foi possível construir URL do vídeo');
+              }
             }}
             className="text-blue-600 hover:text-blue-800 p-1"
             title="Assistir vídeo"
@@ -494,7 +611,7 @@ const Playlists: React.FC = () => {
                 return copy;
               });
             }}
-            className="text-red-600"
+            className="text-red-600 hover:text-red-800 p-1"
             title="Remover vídeo"
           >
             <X size={16} />
@@ -506,7 +623,15 @@ const Playlists: React.FC = () => {
 
   const adicionarTodosDaPasta = (folderId: number) => {
     const videos = videosByFolder[folderId] || [];
-    setSelectedVideos(prev => [...prev, ...videos]);
+    const compatibleVideos = filterCompatibleVideos(videos);
+    
+    if (compatibleVideos.length === 0) {
+      toast.warning('Esta pasta não possui vídeos compatíveis (MP4 dentro do limite de bitrate)');
+      return;
+    }
+    
+    setSelectedVideos(prev => [...prev, ...compatibleVideos]);
+    toast.success(`${compatibleVideos.length} vídeo(s) compatível(is) adicionado(s)`);
   };
 
   const removerTodos = () => setSelectedVideos([]);
@@ -519,6 +644,7 @@ const Playlists: React.FC = () => {
       .join(':');
 
   const abrirPlayerPlaylist = async (playlistId: number) => {
+    setCurrentPlaylistId(playlistId);
     setPlaylistVideosToPlay([]);
     setPlaylistPlayerIndex(0);
     setVideoPlayerModalOpen(false);
@@ -548,19 +674,15 @@ const Playlists: React.FC = () => {
       setPlaylistVideosToPlay(videos);
       setPlaylistPlayerIndex(0);
       
-      // Obter URL usando nova API
-      const urlResponse = await fetch(`/api/videos/view-url?path=${encodeURIComponent(videos[0].url || '')}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
-      if (urlResponse.ok) {
-        const urlData = await urlResponse.json();
-        if (urlData.success && urlData.view_url) {
-          setCurrentVideoUrl(urlData.view_url);
-        }
+      // Construir URL do primeiro vídeo
+      const firstVideoUrl = buildVideoUrl(videos[0]);
+      if (firstVideoUrl) {
+        setCurrentVideoUrl(firstVideoUrl);
+        setVideoPlayerModalOpen(true);
+        setIsPlaying(true);
+      } else {
+        toast.error('Não foi possível construir URL do primeiro vídeo');
       }
-      
-      setVideoPlayerModalOpen(true);
     } catch (error) {
       console.error('Erro ao carregar playlist:', error);
       toast.error('Erro ao carregar vídeos da playlist');
@@ -572,36 +694,17 @@ const Playlists: React.FC = () => {
       const nextIndex = playlistPlayerIndex + 1;
       setPlaylistPlayerIndex(nextIndex);
       
-      // Obter URL do próximo vídeo usando nova API
-      fetch(`/api/videos/view-url?path=${encodeURIComponent(playlistVideosToPlay[nextIndex].url || '')}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` }
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.success && data.view_url) {
-          setCurrentVideoUrl(data.view_url);
-        }
-      })
-      .catch(error => {
-        console.error('Erro ao obter URL do próximo vídeo:', error);
-      });
+      const nextVideoUrl = buildVideoUrl(playlistVideosToPlay[nextIndex]);
+      if (nextVideoUrl) {
+        setCurrentVideoUrl(nextVideoUrl);
+      }
     } else {
       // Repetir playlist do início
       setPlaylistPlayerIndex(0);
-      
-      // Obter URL do primeiro vídeo usando nova API
-      fetch(`/api/videos/view-url?path=${encodeURIComponent(playlistVideosToPlay[0].url || '')}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` }
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.success && data.view_url) {
-          setCurrentVideoUrl(data.view_url);
-        }
-      })
-      .catch(error => {
-        console.error('Erro ao obter URL do primeiro vídeo:', error);
-      });
+      const firstVideoUrl = buildVideoUrl(playlistVideosToPlay[0]);
+      if (firstVideoUrl) {
+        setCurrentVideoUrl(firstVideoUrl);
+      }
     }
   };
 
@@ -610,19 +713,10 @@ const Playlists: React.FC = () => {
       const prevIndex = playlistPlayerIndex - 1;
       setPlaylistPlayerIndex(prevIndex);
       
-      // Obter URL do vídeo anterior usando nova API
-      fetch(`/api/videos/view-url?path=${encodeURIComponent(playlistVideosToPlay[prevIndex].url || '')}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` }
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.success && data.view_url) {
-          setCurrentVideoUrl(data.view_url);
-        }
-      })
-      .catch(error => {
-        console.error('Erro ao obter URL do vídeo anterior:', error);
-      });
+      const prevVideoUrl = buildVideoUrl(playlistVideosToPlay[prevIndex]);
+      if (prevVideoUrl) {
+        setCurrentVideoUrl(prevVideoUrl);
+      }
     }
   };
 
@@ -631,19 +725,84 @@ const Playlists: React.FC = () => {
       const nextIndex = playlistPlayerIndex + 1;
       setPlaylistPlayerIndex(nextIndex);
       
-      // Obter URL do próximo vídeo usando nova API
-      fetch(`/api/videos/view-url?path=${encodeURIComponent(playlistVideosToPlay[nextIndex].url || '')}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` }
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.success && data.view_url) {
-          setCurrentVideoUrl(data.view_url);
-        }
-      })
-      .catch(error => {
-        console.error('Erro ao obter URL do próximo vídeo:', error);
-      });
+      const nextVideoUrl = buildVideoUrl(playlistVideosToPlay[nextIndex]);
+      if (nextVideoUrl) {
+        setCurrentVideoUrl(nextVideoUrl);
+      }
+    }
+  };
+
+  const openActionModal = (playlist: Playlist, actionType: 'start' | 'pause' | 'stop' | 'schedule') => {
+    setSelectedAction({
+      type: actionType,
+      playlistId: playlist.id,
+      playlistName: playlist.nome
+    });
+    setShowActionModal(true);
+  };
+
+  const executePlaylistAction = async () => {
+    if (!selectedAction) return;
+
+    try {
+      const token = await getToken();
+      
+      switch (selectedAction.type) {
+        case 'start':
+          // Iniciar transmissão da playlist
+          const startResponse = await fetch('/api/streaming/start', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              titulo: `Transmissão: ${selectedAction.playlistName}`,
+              playlist_id: selectedAction.playlistId,
+              platform_ids: [] // Sem plataformas por padrão
+            })
+          });
+
+          if (startResponse.ok) {
+            toast.success('Transmissão da playlist iniciada!');
+          } else {
+            const errorData = await startResponse.json();
+            toast.error(errorData.error || 'Erro ao iniciar transmissão');
+          }
+          break;
+
+        case 'schedule':
+          // Redirecionar para agendamentos
+          window.location.href = `/dashboard/agendamentos?playlist=${selectedAction.playlistId}`;
+          break;
+
+        case 'pause':
+        case 'stop':
+          // Parar transmissão
+          const stopResponse = await fetch('/api/streaming/stop', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              stream_type: 'playlist'
+            })
+          });
+
+          if (stopResponse.ok) {
+            toast.success('Transmissão pausada/parada!');
+          } else {
+            toast.error('Erro ao parar transmissão');
+          }
+          break;
+      }
+    } catch (error) {
+      console.error('Erro ao executar ação:', error);
+      toast.error('Erro ao executar ação');
+    } finally {
+      setShowActionModal(false);
+      setSelectedAction(null);
     }
   };
 
@@ -708,6 +867,22 @@ const Playlists: React.FC = () => {
         </button>
       </header>
 
+      {/* Informações sobre filtros */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+        <div className="flex items-start">
+          <CheckCircle className="h-5 w-5 text-blue-600 mr-3 mt-0.5" />
+          <div>
+            <h3 className="text-blue-900 font-medium mb-2">Filtros de Compatibilidade Ativos</h3>
+            <ul className="text-blue-800 text-sm space-y-1">
+              <li>• <strong>Apenas vídeos MP4:</strong> Formato otimizado para streaming</li>
+              <li>• <strong>Bitrate dentro do limite:</strong> Máximo {userBitrateLimit} kbps (seu plano)</li>
+              <li>• <strong>Vídeos otimizados:</strong> Prontos para transmissão sem conversão</li>
+              <li>• <strong>Indicador de bitrate:</strong> <span className="text-green-600">Verde (OK)</span>, <span className="text-yellow-600">Amarelo (Alto)</span>, <span className="text-red-600">Vermelho (Excede)</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <div className="overflow-x-auto rounded-lg border border-gray-300 shadow-sm bg-white">
         <table className="w-full min-w-[500px] sm:min-w-[600px] border-collapse bg-white">
           <thead className="bg-blue-50">
@@ -715,7 +890,7 @@ const Playlists: React.FC = () => {
               <th className="text-left p-4 font-semibold text-blue-800 border-b border-blue-100">Nome</th>
               <th className="text-center p-2 sm:p-4 font-semibold text-blue-800 border-b border-blue-100 w-20 sm:w-28">Qtd. Vídeos</th>
               <th className="text-center p-2 sm:p-4 font-semibold text-blue-800 border-b border-blue-100 w-24 sm:w-36 hidden sm:table-cell">Duração Total</th>
-              <th className="text-center p-2 sm:p-4 font-semibold text-blue-800 border-b border-blue-100 w-24 sm:w-40">Ações</th>
+              <th className="text-center p-2 sm:p-4 font-semibold text-blue-800 border-b border-blue-100 w-32 sm:w-48">Ações</th>
             </tr>
           </thead>
           <tbody>
@@ -729,35 +904,51 @@ const Playlists: React.FC = () => {
             {playlists.map((playlist) => (
               <tr
                 key={playlist.id}
-                className="cursor-pointer transition-colors duration-150 hover:bg-blue-100"
+                className="cursor-pointer transition-colors duration-150 hover:bg-blue-50"
               >
                 <td className="p-2 sm:p-4 max-w-[150px] sm:max-w-xs truncate text-sm sm:text-base">{playlist.nome}</td>
                 <td className="p-2 sm:p-4 text-center text-sm sm:text-base">{playlist.quantidadeVideos ?? 0}</td>
                 <td className="p-2 sm:p-4 text-center text-sm sm:text-base hidden sm:table-cell">
                   {playlist.duracaoTotal ? formatarDuracao(playlist.duracaoTotal) : '00:00:00'}
                 </td>
-                <td className="p-2 sm:p-4 flex justify-center gap-2 sm:gap-4 text-blue-600">
-                  <button
-                    title="Abrir player"
-                    onClick={() => abrirPlayerPlaylist(playlist.id)}
-                    className="hover:text-blue-800 transition"
-                  >
-                    <Play size={16} />
-                  </button>
-                  <button
-                    title="Editar"
-                    onClick={() => abrirModal(playlist)}
-                    className="hover:text-blue-800 transition"
-                  >
-                    <Edit2 size={16} />
-                  </button>
-                  <button
-                    title="Deletar"
-                    onClick={() => confirmarDeletarPlaylist(playlist)}
-                    className="text-red-600 hover:text-red-800 transition"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                <td className="p-2 sm:p-4">
+                  <div className="flex justify-center gap-1 sm:gap-2 flex-wrap">
+                    <button
+                      title="Reproduzir playlist"
+                      onClick={() => abrirPlayerPlaylist(playlist.id)}
+                      className="text-green-600 hover:text-green-800 transition p-1"
+                    >
+                      <Play size={16} />
+                    </button>
+                    <button
+                      title="Iniciar transmissão"
+                      onClick={() => openActionModal(playlist, 'start')}
+                      className="text-blue-600 hover:text-blue-800 transition p-1"
+                    >
+                      <Play size={16} className="fill-current" />
+                    </button>
+                    <button
+                      title="Agendar playlist"
+                      onClick={() => openActionModal(playlist, 'schedule')}
+                      className="text-purple-600 hover:text-purple-800 transition p-1"
+                    >
+                      <Calendar size={16} />
+                    </button>
+                    <button
+                      title="Editar"
+                      onClick={() => abrirModal(playlist)}
+                      className="text-blue-600 hover:text-blue-800 transition p-1"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                    <button
+                      title="Deletar"
+                      onClick={() => confirmarDeletarPlaylist(playlist)}
+                      className="text-red-600 hover:text-red-800 transition p-1"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -786,56 +977,81 @@ const Playlists: React.FC = () => {
               <div className="mb-6 flex flex-col lg:flex-row gap-4 lg:gap-6 flex-grow overflow-hidden">
                 {/* Lista de pastas e vídeos disponíveis */}
                 <div className="w-full lg:flex-1 max-h-[300px] lg:max-h-full overflow-y-auto border border-gray-300 rounded-md p-3 bg-gray-50">
-                  <h2 className="font-semibold mb-3 text-gray-900 text-lg">Pastas e vídeos disponíveis</h2>
-                  {folders.map((folder) => (
-                    <div key={folder.id} className="mb-3">
-                      <div
-                        className="flex items-center justify-between cursor-pointer select-none border-b border-gray-200 pb-2 mb-3 hover:bg-gray-100 transition-colors duration-200"
-                        onClick={() => toggleFolder(folder.id)}
-                      >
-                        <div className="flex items-center gap-2">
-                          {expandedFolders[folder.id] ? (
-                            <ChevronDown size={20} className="text-blue-600" />
-                          ) : (
-                            <ChevronRight size={20} className="text-blue-600" />
-                          )}
-                          <span className="font-semibold text-gray-900 text-sm sm:text-lg truncate">{folder.nome}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            adicionarTodosDaPasta(folder.id);
-                          }}
-                          className="text-blue-600 hover:text-blue-800 transition-colors duration-200"
-                          title="Adicionar todos da pasta"
+                  <h2 className="font-semibold mb-3 text-gray-900 text-lg">
+                    Vídeos compatíveis disponíveis
+                    <span className="text-sm text-gray-600 font-normal ml-2">
+                      (MP4, ≤{userBitrateLimit} kbps)
+                    </span>
+                  </h2>
+                  {folders.map((folder) => {
+                    const folderVideos = videosByFolder[folder.id] || [];
+                    const compatibleCount = folderVideos.length;
+                    
+                    return (
+                      <div key={folder.id} className="mb-3">
+                        <div
+                          className="flex items-center justify-between cursor-pointer select-none border-b border-gray-200 pb-2 mb-3 hover:bg-gray-100 transition-colors duration-200"
+                          onClick={() => toggleFolder(folder.id)}
                         >
-                          <PlusCircle size={18} />
-                        </button>
-                      </div>
+                          <div className="flex items-center gap-2">
+                            {expandedFolders[folder.id] ? (
+                              <ChevronDown size={20} className="text-blue-600" />
+                            ) : (
+                              <ChevronRight size={20} className="text-blue-600" />
+                            )}
+                            <span className="font-semibold text-gray-900 text-sm sm:text-lg truncate">
+                              {folder.nome}
+                            </span>
+                            <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">
+                              {compatibleCount} compatível(is)
+                            </span>
+                          </div>
+                          {compatibleCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                adicionarTodosDaPasta(folder.id);
+                              }}
+                              className="text-blue-600 hover:text-blue-800 transition-colors duration-200"
+                              title="Adicionar todos da pasta"
+                            >
+                              <PlusCircle size={18} />
+                            </button>
+                          )}
+                        </div>
 
-                      {expandedFolders[folder.id] && (
-                        <DndContext sensors={sensors} onDragEnd={onDragEnd}>
-                          <SortableContext
-                            items={videosByFolder[folder.id]?.map(v => `available-${v.id}`) || []}
-                            strategy={verticalListSortingStrategy}
-                          >
-                            <ul>
-                              {(videosByFolder[folder.id] || []).map((video, index) => (
-                                <AvailableVideo key={video.id} video={video} index={index} />
-                              ))}
-                            </ul>
-                          </SortableContext>
-                        </DndContext>
-                      )}
-                    </div>
-                  ))}
+                        {expandedFolders[folder.id] && (
+                          <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+                            <SortableContext
+                              items={folderVideos.map(v => `available-${v.id}`)}
+                              strategy={verticalListSortingStrategy}
+                            >
+                              <ul>
+                                {folderVideos.map((video, index) => (
+                                  <AvailableVideo key={video.id} video={video} index={index} />
+                                ))}
+                              </ul>
+                            </SortableContext>
+                          </DndContext>
+                        )}
+
+                        {expandedFolders[folder.id] && compatibleCount === 0 && (
+                          <div className="text-center py-4 text-gray-500 text-sm">
+                            <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-gray-300" />
+                            <p>Nenhum vídeo compatível nesta pasta</p>
+                            <p className="text-xs">Vídeos devem ser MP4 com bitrate ≤{userBitrateLimit} kbps</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {/* Lista de vídeos selecionados na playlist */}
                 <div className="w-full lg:flex-1 max-h-[300px] lg:max-h-full overflow-y-auto border border-gray-300 rounded-md p-3 flex flex-col bg-gray-50">
                   <h2 className="font-semibold mb-3 flex justify-between items-center text-gray-900 text-lg">
-                    Vídeos na playlist
+                    Vídeos na playlist ({selectedVideos.length})
                     <button
                       type="button"
                       onClick={removerTodos}
@@ -851,10 +1067,17 @@ const Playlists: React.FC = () => {
                       items={selectedVideos.map((_, i) => `selected-${i}`)}
                       strategy={verticalListSortingStrategy}
                     >
-                      <ul className="flex-grow overflow-y-auto">
-                        {selectedVideos.map((video, index) => (
-                          <SelectedVideo key={`${video.id}-${index}`} video={video} index={index} />
-                        ))}
+                      <ul className="flex-grow overflow-y-auto" id="selected-container">
+                        {selectedVideos.length === 0 ? (
+                          <div className="text-center py-8 text-gray-500">
+                            <Play className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                            <p className="text-sm">Arraste vídeos aqui para criar a playlist</p>
+                          </div>
+                        ) : (
+                          selectedVideos.map((video, index) => (
+                            <SelectedVideo key={`${video.id}-${index}`} video={video} index={index} />
+                          ))
+                        )}
                       </ul>
                     </SortableContext>
                   </DndContext>
@@ -875,7 +1098,7 @@ const Playlists: React.FC = () => {
                 <button
                   type="submit"
                   className="w-full sm:w-auto px-5 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors duration-200 disabled:opacity-50"
-                  disabled={loading}
+                  disabled={loading || selectedVideos.length === 0}
                 >
                   {loading ? 'Salvando...' : 'Salvar'}
                 </button>
@@ -886,7 +1109,7 @@ const Playlists: React.FC = () => {
       )}
 
       {/* Modal do Player Universal */}
-      {videoPlayerModalOpen && (
+      {videoPlayerModalOpen && currentVideoUrl && (
         <div 
           className="fixed inset-0 bg-black bg-opacity-95 flex justify-center items-center z-50 p-4"
           onClick={(e) => {
@@ -896,18 +1119,73 @@ const Playlists: React.FC = () => {
           }}
         >
           <div className={`bg-black rounded-lg relative ${
-            isFullscreen ? 'w-screen h-screen' : 'max-w-4xl w-full h-[70vh]'
+            isFullscreen ? 'w-screen h-screen' : 'max-w-5xl w-full h-[80vh]'
           }`}>
-            {/* Botão de fechar */}
-            <button
-              onClick={closePlayerModal}
-              className="absolute top-4 right-4 z-20 text-white bg-red-600 hover:bg-red-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
-              title="Fechar player"
-            >
-              <X size={16} />
-            </button>
+            {/* Controles do Player */}
+            <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between">
+              <div className="bg-black bg-opacity-60 text-white px-4 py-2 rounded-lg">
+                <h3 className="font-medium">
+                  {playlistVideosToPlay[playlistPlayerIndex]?.nome || 'Vídeo'}
+                </h3>
+                <p className="text-xs opacity-80">
+                  {playlistVideosToPlay.length > 1 ? 
+                    `${playlistPlayerIndex + 1} de ${playlistVideosToPlay.length}` : 
+                    'Vídeo único'
+                  }
+                </p>
+              </div>
 
-            {/* Player iFrame apenas */}
+              <div className="flex items-center space-x-2">
+                {/* Controles de navegação da playlist */}
+                {playlistVideosToPlay.length > 1 && (
+                  <>
+                    <button
+                      onClick={goToPreviousVideo}
+                      disabled={playlistPlayerIndex === 0}
+                      className="text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full p-2 transition-colors duration-200 shadow-lg"
+                      title="Vídeo anterior"
+                    >
+                      <SkipBack size={16} />
+                    </button>
+
+                    <button
+                      onClick={() => setIsPlaying(!isPlaying)}
+                      className="text-white bg-green-600 hover:bg-green-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
+                      title={isPlaying ? "Pausar" : "Reproduzir"}
+                    >
+                      {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                    </button>
+
+                    <button
+                      onClick={goToNextVideo}
+                      disabled={playlistPlayerIndex === playlistVideosToPlay.length - 1}
+                      className="text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full p-2 transition-colors duration-200 shadow-lg"
+                      title="Próximo vídeo"
+                    >
+                      <SkipForward size={16} />
+                    </button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => setIsFullscreen(!isFullscreen)}
+                  className="text-white bg-purple-600 hover:bg-purple-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
+                  title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+                >
+                  {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+                </button>
+
+                <button
+                  onClick={closePlayerModal}
+                  className="text-white bg-red-600 hover:bg-red-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
+                  title="Fechar player"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+
+            {/* Player iFrame */}
             <div className="w-full h-full">
               <IFrameVideoPlayer
                 src={currentVideoUrl}
@@ -921,8 +1199,99 @@ const Playlists: React.FC = () => {
                 }}
                 onReady={() => {
                   console.log('IFrame player pronto');
+                  setIsPlaying(true);
                 }}
               />
+            </div>
+
+            {/* Lista de vídeos da playlist (se mais de 1) */}
+            {playlistVideosToPlay.length > 1 && (
+              <div className="absolute bottom-4 left-4 right-4 z-20 bg-black bg-opacity-80 text-white p-4 rounded-lg max-h-32 overflow-y-auto">
+                <h4 className="text-sm font-medium mb-2">Playlist ({playlistVideosToPlay.length} vídeos)</h4>
+                <div className="space-y-1">
+                  {playlistVideosToPlay.map((video, index) => (
+                    <button
+                      key={video.id}
+                      onClick={() => {
+                        setPlaylistPlayerIndex(index);
+                        const videoUrl = buildVideoUrl(video);
+                        if (videoUrl) {
+                          setCurrentVideoUrl(videoUrl);
+                        }
+                      }}
+                      className={`w-full text-left px-3 py-2 rounded text-xs transition-colors ${
+                        index === playlistPlayerIndex 
+                          ? 'bg-blue-600 text-white' 
+                          : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="truncate">{index + 1}. {video.nome}</span>
+                        <div className="flex items-center space-x-2 ml-2">
+                          <span className="text-green-400">
+                            {video.bitrate_video || 0} kbps
+                          </span>
+                          {index === playlistPlayerIndex && (
+                            <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Ações da Playlist */}
+      {showActionModal && selectedAction && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+              {selectedAction.type === 'start' && 'Iniciar Transmissão'}
+              {selectedAction.type === 'schedule' && 'Agendar Playlist'}
+              {selectedAction.type === 'pause' && 'Pausar Transmissão'}
+              {selectedAction.type === 'stop' && 'Parar Transmissão'}
+            </h3>
+            
+            <p className="text-gray-700 mb-4">
+              {selectedAction.type === 'start' && `Deseja iniciar a transmissão da playlist "${selectedAction.playlistName}"?`}
+              {selectedAction.type === 'schedule' && `Você será redirecionado para a página de agendamentos para configurar quando a playlist "${selectedAction.playlistName}" deve ser executada.`}
+              {selectedAction.type === 'pause' && `Deseja pausar a transmissão atual?`}
+              {selectedAction.type === 'stop' && `Deseja parar a transmissão atual?`}
+            </p>
+
+            {selectedAction.type === 'start' && (
+              <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4">
+                <p className="text-sm text-blue-800">
+                  <strong>Nota:</strong> A transmissão será iniciada sem plataformas configuradas. 
+                  Você pode configurar plataformas na página "Iniciar Transmissão".
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowActionModal(false)}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={executePlaylistAction}
+                className={`px-4 py-2 rounded-md transition-colors text-white ${
+                  selectedAction.type === 'start' ? 'bg-green-600 hover:bg-green-700' :
+                  selectedAction.type === 'schedule' ? 'bg-purple-600 hover:bg-purple-700' :
+                  'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {selectedAction.type === 'start' && 'Iniciar Transmissão'}
+                {selectedAction.type === 'schedule' && 'Ir para Agendamentos'}
+                {selectedAction.type === 'pause' && 'Pausar'}
+                {selectedAction.type === 'stop' && 'Parar'}
+              </button>
             </div>
           </div>
         </div>
